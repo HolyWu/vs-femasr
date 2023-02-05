@@ -17,7 +17,7 @@ from torch_tensorrt.fx.utils import LowerPrecision
 from .femasr_arch import FeMaSRNet, VectorQuantizer
 from .network_swinir import RSTB
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 
