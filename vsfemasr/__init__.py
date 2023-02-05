@@ -15,7 +15,7 @@ from torch_tensorrt.fx.lower import Lowerer
 from torch_tensorrt.fx.utils import LowerPrecision
 
 from .femasr_arch import FeMaSRNet, VectorQuantizer
-from .network_swinir import SwinTransformerBlock
+from .network_swinir import RSTB
 
 __version__ = "1.0.0"
 
@@ -157,7 +157,7 @@ def femasr(
             lower_setting = LowerSetting(
                 lower_precision=LowerPrecision.FP16 if fp16 else LowerPrecision.FP32,
                 min_acc_module_size=1,
-                leaf_module_list={SwinTransformerBlock, VectorQuantizer},
+                leaf_module_list={RSTB, VectorQuantizer},
                 max_workspace_size=trt_max_workspace_size,
                 dynamic_batch=False,
                 tactic_sources=1 << int(tensorrt.TacticSource.EDGE_MASK_CONVOLUTIONS)
