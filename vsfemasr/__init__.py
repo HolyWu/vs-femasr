@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass
 from threading import Lock
 
 import numpy as np
@@ -23,22 +22,6 @@ __version__ = '1.0.0'
 package_dir = os.path.dirname(os.path.realpath(__file__))
 
 
-class Backend:
-    @dataclass
-    class Eager:
-        module: torch.nn.Module
-
-    @dataclass
-    class CUDAGraphs:
-        graph: list[torch.cuda.CUDAGraph]
-        static_input: list[torch.Tensor]
-        static_output: list[torch.Tensor]
-
-    @dataclass
-    class TensorRT:
-        module: list[torch.nn.Module]
-
-
 @torch.inference_mode()
 def femasr(
     clip: vs.VideoNode,
@@ -50,9 +33,6 @@ def femasr(
     trt_max_workspace_size: int = 1 << 25,
     trt_cache_path: str = package_dir,
     model: int = 0,
-    tile_w: int = 0,
-    tile_h: int = 0,
-    tile_pad: int = 16,
 ) -> vs.VideoNode:
     """Real-World Blind Super-Resolution via Feature Matching with Implicit High-Resolution Priors
 
@@ -71,11 +51,6 @@ def femasr(
     :param model:                   Model to use.
                                     0 = FeMaSR_SRX2_model_g
                                     1 = FeMaSR_SRX4_model_g
-    :param tile_w:                  Tile width. As too large images result in the out of GPU memory issue, so this tile
-                                    option will first crop input images into tiles, and then process each of them.
-                                    Finally, they will be merged into one image. 0 denotes for do not use tile.
-    :param tile_h:                  Tile height.
-    :param tile_pad:                Pad size for each tile, to remove border artifacts.
     """
     if not isinstance(clip, vs.VideoNode):
         raise vs.Error('femasr: this is not a clip')
@@ -134,12 +109,8 @@ def femasr(
         module.half()
         torch.set_default_tensor_type(torch.HalfTensor)
 
-    if tile_w > 0 and tile_h > 0:
-        pad_w = ((min(tile_w + 2 * tile_pad, clip.width) - 1) // modulo + 1) * modulo
-        pad_h = ((min(tile_h + 2 * tile_pad, clip.height) - 1) // modulo + 1) * modulo
-    else:
-        pad_w = ((clip.width - 1) // modulo + 1) * modulo
-        pad_h = ((clip.height - 1) // modulo + 1) * modulo
+    pad_w = ((clip.width - 1) // modulo + 1) * modulo
+    pad_h = ((clip.height - 1) // modulo + 1) * modulo
 
     if nvfuser:
         module = memory_efficient_fusion(module)
@@ -162,8 +133,6 @@ def femasr(
             graph.append(torch.cuda.CUDAGraph())
             with torch.cuda.graph(graph[i], stream=stream[i]):
                 static_output.append(module(static_input[i]))
-
-        backend = Backend.CUDAGraphs(graph, static_input, static_output)
     elif trt:
         device_name = torch.cuda.get_device_name(device)
         trt_version = tensorrt.__version__
@@ -201,9 +170,6 @@ def femasr(
         del module
         torch.cuda.empty_cache()
         module = [torch.load(trt_engine_path) for _ in range(num_streams)]
-        backend = Backend.TensorRT(module)
-    else:
-        backend = Backend.Eager(module)
 
     index = -1
     index_lock = Lock()
@@ -218,22 +184,19 @@ def femasr(
         with stream_lock[local_index], torch.cuda.stream(stream[local_index]):
             img = frame_to_tensor(f[0], device)
 
-            if tile_w > 0 and tile_h > 0:
-                output = tile_process(img, scale, tile_w, tile_h, tile_pad, pad_w, pad_h, backend, local_index)
+            h, w = img.shape[2:]
+            img = F.pad(img, (0, pad_w - w, 0, pad_h - h), 'reflect')
+
+            if cuda_graphs:
+                static_input[local_index].copy_(img)
+                graph[local_index].replay()
+                output = static_output[local_index]
+            elif trt:
+                output = module[local_index](img)
             else:
-                h, w = img.shape[2:]
-                img = F.pad(img, (0, pad_w - w, 0, pad_h - h), 'reflect')
+                output = module(img)
 
-                if cuda_graphs:
-                    static_input[local_index].copy_(img)
-                    graph[local_index].replay()
-                    output = static_output[local_index]
-                elif trt:
-                    output = module[local_index](img)
-                else:
-                    output = module(img)
-
-                output = output[:, :, : h * scale, : w * scale]
+            output = output[:, :, : h * scale, : w * scale]
 
             return tensor_to_frame(output, f[1].copy())
 
@@ -253,83 +216,3 @@ def tensor_to_frame(tensor: torch.Tensor, frame: vs.VideoFrame) -> vs.VideoFrame
     for plane in range(frame.format.num_planes):
         np.copyto(np.asarray(frame[plane]), array[plane, :, :])
     return frame
-
-
-def tile_process(
-    img: torch.Tensor,
-    scale: int,
-    tile_w: int,
-    tile_h: int,
-    tile_pad: int,
-    pad_w: int,
-    pad_h: int,
-    backend: Backend.Eager | Backend.CUDAGraphs | Backend.TensorRT,
-    index: int,
-) -> torch.Tensor:
-    batch, channel, height, width = img.shape
-    output_shape = (batch, channel, height * scale, width * scale)
-
-    # start with black image
-    output = img.new_zeros(output_shape)
-
-    tiles_x = math.ceil(width / tile_w)
-    tiles_y = math.ceil(height / tile_h)
-
-    # loop over all tiles
-    for y in range(tiles_y):
-        for x in range(tiles_x):
-            # extract tile from input image
-            ofs_x = x * tile_w
-            ofs_y = y * tile_h
-
-            # input tile area on total image
-            input_start_x = ofs_x
-            input_end_x = min(ofs_x + tile_w, width)
-            input_start_y = ofs_y
-            input_end_y = min(ofs_y + tile_h, height)
-
-            # input tile area on total image with padding
-            input_start_x_pad = max(input_start_x - tile_pad, 0)
-            input_end_x_pad = min(input_end_x + tile_pad, width)
-            input_start_y_pad = max(input_start_y - tile_pad, 0)
-            input_end_y_pad = min(input_end_y + tile_pad, height)
-
-            # input tile dimensions
-            input_tile_width = input_end_x - input_start_x
-            input_tile_height = input_end_y - input_start_y
-
-            input_tile = img[:, :, input_start_y_pad:input_end_y_pad, input_start_x_pad:input_end_x_pad]
-
-            h, w = input_tile.shape[2:]
-            input_tile = F.pad(input_tile, (0, pad_w - w, 0, pad_h - h), 'reflect')
-
-            # process tile
-            if isinstance(backend, Backend.CUDAGraphs):
-                backend.static_input[index].copy_(input_tile)
-                backend.graph[index].replay()
-                output_tile = backend.static_output[index]
-            elif isinstance(backend, Backend.TensorRT):
-                output_tile = backend.module[index](input_tile)
-            else:
-                output_tile = backend.module(input_tile)
-
-            output_tile = output_tile[:, :, : h * scale, : w * scale]
-
-            # output tile area on total image
-            output_start_x = input_start_x * scale
-            output_end_x = input_end_x * scale
-            output_start_y = input_start_y * scale
-            output_end_y = input_end_y * scale
-
-            # output tile area without padding
-            output_start_x_tile = (input_start_x - input_start_x_pad) * scale
-            output_end_x_tile = output_start_x_tile + input_tile_width * scale
-            output_start_y_tile = (input_start_y - input_start_y_pad) * scale
-            output_end_y_tile = output_start_y_tile + input_tile_height * scale
-
-            # put tile into output image
-            output[:, :, output_start_y:output_end_y, output_start_x:output_end_x] = output_tile[
-                :, :, output_start_y_tile:output_end_y_tile, output_start_x_tile:output_end_x_tile
-            ]
-
-    return output
