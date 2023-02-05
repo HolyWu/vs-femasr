@@ -32,6 +32,7 @@ def femasr(
     nvfuser: bool = False,
     cuda_graphs: bool = False,
     trt: bool = False,
+    trt_min_subgraph_size: int = 1,
     trt_max_workspace_size: int = 1 << 25,
     trt_cache_path: str = package_dir,
     model: int = 0,
@@ -46,6 +47,9 @@ def femasr(
     :param cuda_graphs:             Use CUDA Graphs to remove CPU overhead associated with launching CUDA kernels
                                     sequentially. Not allowed in TensorRT.
     :param trt:                     Use TensorRT for high-performance inference.
+    :param trt_min_subgraph_size:   Minimum node size in a subgraph after splitting. Subgraphs with smaller size will
+                                    fall back to CUDA. Try trt_min_subgraph_size=5 if TensorRT engine cannot be built
+                                    due to insufficient VRAM, but the performance will degrade.
     :param trt_max_workspace_size:  Maximum workspace size for TensorRT engine.
     :param trt_cache_path:          Path for TensorRT engine file. Engine will be cached when it's built for the first
                                     time. Note each engine is created for specific settings such as model path/name,
@@ -156,7 +160,7 @@ def femasr(
         if not os.path.isfile(trt_engine_path):
             lower_setting = LowerSetting(
                 lower_precision=LowerPrecision.FP16 if fp16 else LowerPrecision.FP32,
-                min_acc_module_size=1,
+                min_acc_module_size=trt_min_subgraph_size,
                 leaf_module_list={RSTB, VectorQuantizer},
                 max_workspace_size=trt_max_workspace_size,
                 dynamic_batch=False,
