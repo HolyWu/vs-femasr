@@ -25,15 +25,15 @@ class VectorQuantizer(nn.Module):
         self.n_e = int(n_e)
         self.e_dim = int(e_dim)
         self.LQ_stage = LQ_stage
-        self.beta = beta 
+        self.beta = beta
         self.embedding = nn.Embedding(self.n_e, self.e_dim)
         self.embedding.weight.data.uniform_(-1.0 / self.n_e, 1.0 / self.n_e)
-    
+
     def dist(self, x, y):
         return torch.sum(x ** 2, dim=1, keepdim=True) + \
                     torch.sum(y**2, dim=1) - 2 * \
                     torch.matmul(x, y.t())
-    
+
     def gram_loss(self, x, y):
         b, h, w, c = x.shape
         x = x.reshape(b, h*w, c)
@@ -41,7 +41,7 @@ class VectorQuantizer(nn.Module):
 
         gmx = x.transpose(1, 2) @ x / (h*w)
         gmy = y.transpose(1, 2) @ y / (h*w)
-    
+
         return (gmx - gmy).square().mean()
 
     def forward(self, z, gt_indices=None, current_iter=None):
@@ -49,7 +49,7 @@ class VectorQuantizer(nn.Module):
         Args:
             z: input features to be quantized, z (continuous) -> z_q (discrete)
                z.shape = (batch, channel, height, width)
-            gt_indices: feature map of given indices, used for visualization. 
+            gt_indices: feature map of given indices, used for visualization.
         """
         # reshape z -> (batch, height, width, channel) and flatten
         z = z.permute(0, 2, 3, 1).contiguous()
@@ -58,17 +58,17 @@ class VectorQuantizer(nn.Module):
         codebook = self.embedding.weight
 
         d = self.dist(z_flattened, codebook)
-        
+
         # find closest encodings
         min_encoding_indices = torch.argmin(d, dim=1).unsqueeze(1)
-        min_encodings = torch.zeros(min_encoding_indices.shape[0], codebook.shape[0], device=z.device)
+        min_encodings = z.new_zeros((min_encoding_indices.shape[0], codebook.shape[0]))
         min_encodings.scatter_(1, min_encoding_indices, 1)
 
         if gt_indices is not None:
             gt_indices = gt_indices.reshape(-1)
 
             gt_min_indices = gt_indices.reshape_as(min_encoding_indices)
-            gt_min_onehot = torch.zeros(gt_min_indices.shape[0], codebook.shape[0], device=z.device)
+            gt_min_onehot = z.new_zeros((gt_min_indices.shape[0], codebook.shape[0]))
             gt_min_onehot.scatter_(1, gt_min_indices, 1)
 
             z_q_gt = torch.matmul(gt_min_onehot, codebook)
@@ -82,9 +82,9 @@ class VectorQuantizer(nn.Module):
         q_latent_loss = torch.mean((z_q - z.detach())**2)
 
         if self.LQ_stage and gt_indices is not None:
-            codebook_loss = self.beta * ((z_q_gt.detach() - z) ** 2).mean() 
-            texture_loss = self.gram_loss(z, z_q_gt.detach()) 
-            codebook_loss = codebook_loss + texture_loss 
+            codebook_loss = self.beta * ((z_q_gt.detach() - z) ** 2).mean()
+            texture_loss = self.gram_loss(z, z_q_gt.detach())
+            codebook_loss = codebook_loss + texture_loss
         else:
             codebook_loss = q_latent_loss + e_latent_loss * self.beta
 
@@ -97,7 +97,7 @@ class VectorQuantizer(nn.Module):
         return z_q, codebook_loss, min_encoding_indices.reshape(z_q.shape[0], 1, z_q.shape[2], z_q.shape[3])
 
 class SwinLayers(nn.Module):
-    def __init__(self, input_resolution=(32, 32), embed_dim=256, 
+    def __init__(self, input_resolution=(32, 32), embed_dim=256,
                 blk_depth=6,
                 num_heads=8,
                 window_size=8,
@@ -107,13 +107,13 @@ class SwinLayers(nn.Module):
         for i in range(4):
             layer = RSTB(embed_dim, input_resolution, blk_depth, num_heads, window_size, patch_size=1, **kwargs)
             self.swin_blks.append(layer)
-    
+
     def forward(self, x):
         b, c, h, w = x.shape
         x = x.reshape(b, c, h*w).transpose(1, 2)
         for m in self.swin_blks:
             x = m(x, (h, w))
-        x = x.transpose(1, 2).reshape(b, c, h, w) 
+        x = x.transpose(1, 2).reshape(b, c, h, w)
         return x
 
 
@@ -148,7 +148,7 @@ class MultiScaleEncoder(nn.Module):
             self.blocks.append(nn.Sequential(*tmp_down_block))
             res = res // 2
 
-        if LQ_stage: 
+        if LQ_stage:
             self.blocks.append(SwinLayers(**swin_opts))
             upsampler = nn.ModuleList()
             for i in range(2):
@@ -161,7 +161,7 @@ class MultiScaleEncoder(nn.Module):
                     )
                 )
                 res = res * 2
-        
+
             self.blocks += upsampler
 
         self.LQ_stage = LQ_stage
@@ -234,13 +234,13 @@ class FeMaSRNet(nn.Module):
             512: 32,
         }
 
-        # build encoder 
+        # build encoder
         self.max_depth = int(np.log2(gt_resolution // self.codebook_scale[0]))
         encode_depth = int(np.log2(gt_resolution // self.scale_factor // self.codebook_scale[0]))
         self.multiscale_encoder = MultiScaleEncoder(
-                                in_channel,     
-                                encode_depth,  
-                                self.gt_res // self.scale_factor, 
+                                in_channel,
+                                encode_depth,
+                                self.gt_res // self.scale_factor,
                                 channel_query_dict,
                                 norm_type, act_type, LQ_stage
                             )
@@ -255,7 +255,7 @@ class FeMaSRNet(nn.Module):
 
         self.out_conv = nn.Conv2d(out_ch, 3, 3, 1, 1)
 
-        # build multi-scale vector quantizers 
+        # build multi-scale vector quantizers
         self.quantize_group = nn.ModuleList()
         self.before_quant_group = nn.ModuleList()
         self.after_quant_group = nn.ModuleList()
@@ -289,7 +289,7 @@ class FeMaSRNet(nn.Module):
                 nn.ReLU(),
                 )
             self.vgg_feat_layer = 'relu4_4'
-            self.vgg_feat_extractor = VGGFeatureExtractor([self.vgg_feat_layer]) 
+            self.vgg_feat_extractor = VGGFeatureExtractor([self.vgg_feat_layer])
 
     def encode_and_decode(self, input, gt_indices=None, current_iter=None):
         enc_feats = self.multiscale_encoder(input.detach())
@@ -328,7 +328,7 @@ class FeMaSRNet(nn.Module):
                     semantic_z_quant = self.conv_semantic(z_quant)
                     semantic_loss = F.mse_loss(semantic_z_quant, vgg_feat)
                     semantic_loss_list.append(semantic_loss)
-                
+
                 if not self.use_quantize:
                     z_quant = feat_to_quant
 
@@ -344,7 +344,7 @@ class FeMaSRNet(nn.Module):
                 if self.LQ_stage and self.use_residual:
                     x = x + enc_feats[i]
                 else:
-                    x = x 
+                    x = x
 
             x = self.decoder_group[i](x)
             prev_dec_feat = x
@@ -355,6 +355,6 @@ class FeMaSRNet(nn.Module):
         semantic_loss = sum(semantic_loss_list) if len(semantic_loss_list) else codebook_loss * 0
 
         return out_img
-    
+
     def forward(self, input):
         return self.encode_and_decode(input)

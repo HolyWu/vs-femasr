@@ -17,7 +17,7 @@ from torch_tensorrt.fx.utils import LowerPrecision
 from .femasr_arch import FeMaSRNet, VectorQuantizer
 from .network_swinir import SwinTransformerBlock
 
-__version__ = '1.0.0'
+__version__ = "1.0.0"
 
 package_dir = os.path.dirname(os.path.realpath(__file__))
 
@@ -53,64 +53,64 @@ def femasr(
                                     1 = FeMaSR_SRX4_model_g
     """
     if not isinstance(clip, vs.VideoNode):
-        raise vs.Error('femasr: this is not a clip')
+        raise vs.Error("femasr: this is not a clip")
 
     if clip.format.id not in (vs.RGBH, vs.RGBS):
-        raise vs.Error('femasr: only RGBH and RGBS formats are supported')
+        raise vs.Error("femasr: only RGBH and RGBS formats are supported")
 
     if not torch.cuda.is_available():
-        raise vs.Error('femasr: CUDA is not available')
+        raise vs.Error("femasr: CUDA is not available")
 
     if num_streams < 1:
-        raise vs.Error('femasr: num_streams must be at least 1')
+        raise vs.Error("femasr: num_streams must be at least 1")
 
     if num_streams > vs.core.num_threads:
-        raise vs.Error('femasr: setting num_streams greater than `core.num_threads` is useless')
+        raise vs.Error("femasr: setting num_streams greater than `core.num_threads` is useless")
 
     if trt:
         if nvfuser:
-            raise vs.Error('femasr: nvfuser and trt are mutually exclusive')
+            raise vs.Error("femasr: nvfuser and trt are mutually exclusive")
 
         if cuda_graphs:
-            raise vs.Error('femasr: cuda_graphs and trt are mutually exclusive')
+            raise vs.Error("femasr: cuda_graphs and trt are mutually exclusive")
 
     if model not in range(2):
-        raise vs.Error('femasr: model must be 0 or 1')
+        raise vs.Error("femasr: model must be 0 or 1")
 
-    if os.path.getsize(os.path.join(package_dir, 'FeMaSR_SRX2_model_g.pth')) == 0:
+    if os.path.getsize(os.path.join(package_dir, "FeMaSR_SRX2_model_g.pth")) == 0:
         raise vs.Error("femasr: model files have not been downloaded. run 'python -m vsfemasr' first")
 
     torch.backends.cuda.matmul.allow_tf32 = True
 
     fp16 = clip.format.bits_per_sample == 16
 
-    device = torch.device('cuda', device_index)
+    device = torch.device("cuda", device_index)
 
     stream = [torch.cuda.Stream(device=device) for _ in range(num_streams)]
     stream_lock = [Lock() for _ in range(num_streams)]
 
     match model:
         case 0:
-            model_name = 'FeMaSR_SRX2_model_g.pth'
+            model_name = "FeMaSR_SRX2_model_g.pth"
             scale = 2
             modulo = 32
         case 1:
-            model_name = 'FeMaSR_SRX4_model_g.pth'
+            model_name = "FeMaSR_SRX4_model_g.pth"
             scale = 4
             modulo = 16
 
     model_path = os.path.join(package_dir, model_name)
 
     module = FeMaSRNet(codebook_params=[[32, 1024, 512]], LQ_stage=True, scale_factor=scale)
-    module.load_state_dict(torch.load(model_path, map_location='cpu')['params'], strict=False)
+    module.load_state_dict(torch.load(model_path, map_location="cpu")["params"], strict=False)
     module.eval().to(device, memory_format=torch.channels_last)
 
     if fp16:
         module.half()
         torch.set_default_tensor_type(torch.HalfTensor)
 
-    pad_w = ((clip.width - 1) // modulo + 1) * modulo
-    pad_h = ((clip.height - 1) // modulo + 1) * modulo
+    pad_w = math.ceil(clip.width / modulo) * modulo
+    pad_h = math.ceil(clip.height / modulo) * modulo
 
     if nvfuser:
         module = memory_efficient_fusion(module)
@@ -121,7 +121,7 @@ def femasr(
         static_output: list[torch.Tensor] = []
 
         for i in range(num_streams):
-            static_input.append(torch.empty(1, 3, pad_h, pad_w, device=device, memory_format=torch.channels_last))
+            static_input.append(torch.zeros((1, 3, pad_h, pad_w), device=device).to(memory_format=torch.channels_last))
 
             torch.cuda.synchronize(device=device)
             stream[i].wait_stream(torch.cuda.current_stream(device=device))
@@ -136,18 +136,18 @@ def femasr(
     elif trt:
         device_name = torch.cuda.get_device_name(device)
         trt_version = tensorrt.__version__
-        dimensions = f'{pad_w}x{pad_h}'
-        precision = 'fp16' if fp16 else 'fp32'
+        dimensions = f"{pad_w}x{pad_h}"
+        precision = "fp16" if fp16 else "fp32"
         trt_engine_path = os.path.join(
             os.path.realpath(trt_cache_path),
             (
-                f'{model_name}'
-                + f'_{device_name}'
-                + f'_trt-{trt_version}'
-                + f'_{dimensions}'
-                + f'_{precision}'
-                + f'_workspace-{trt_max_workspace_size}'
-                + '.pt'
+                f"{model_name}"
+                + f"_{device_name}"
+                + f"_trt-{trt_version}"
+                + f"_{dimensions}"
+                + f"_{precision}"
+                + f"_workspace-{trt_max_workspace_size}"
+                + ".pt"
             ),
         )
 
@@ -163,7 +163,7 @@ def femasr(
             )
             lowerer = Lowerer.create(lower_setting=lower_setting)
             module = lowerer(
-                module, [torch.empty(1, 3, pad_h, pad_w, device=device, memory_format=torch.channels_last)]
+                module, [torch.zeros((1, 3, pad_h, pad_w), device=device).to(memory_format=torch.channels_last)]
             )
             torch.save(module, trt_engine_path)
 
@@ -185,7 +185,7 @@ def femasr(
             img = frame_to_tensor(f[0], device)
 
             h, w = img.shape[2:]
-            img = F.pad(img, (0, pad_w - w, 0, pad_h - h), 'reflect')
+            img = F.pad(img, (0, pad_w - w, 0, pad_h - h), "reflect")
 
             if cuda_graphs:
                 static_input[local_index].copy_(img)

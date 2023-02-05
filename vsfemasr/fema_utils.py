@@ -37,7 +37,7 @@ class ActLayer(nn.Module):
         - relu type: type of relu layer, candidates are
             - ReLU
             - LeakyReLU: default relu slope 0.2
-            - PRelu 
+            - PRelu
             - SELU
             - none: direct pass
     """
@@ -98,5 +98,3 @@ class CombineQuantBlock(nn.Module):
             input = input1
         out = self.conv(input)
         return out
-
-
