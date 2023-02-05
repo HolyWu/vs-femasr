@@ -19,6 +19,8 @@ from .network_swinir import SwinTransformerBlock
 
 __version__ = "1.0.0"
 
+os.environ["CUDA_MODULE_LOADING"] = "LAZY"
+
 package_dir = os.path.dirname(os.path.realpath(__file__))
 
 
