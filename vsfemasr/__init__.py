@@ -89,6 +89,7 @@ def femasr(
     torch.backends.cuda.matmul.allow_tf32 = True
 
     fp16 = clip.format.bits_per_sample == 16
+    dtype = torch.half if fp16 else torch.float
 
     device = torch.device("cuda", device_index)
 
@@ -110,10 +111,8 @@ def femasr(
     module = FeMaSRNet(codebook_params=[[32, 1024, 512]], LQ_stage=True, scale_factor=scale)
     module.load_state_dict(torch.load(model_path, map_location="cpu")["params"], strict=False)
     module.eval().to(device, memory_format=torch.channels_last)
-
     if fp16:
         module.half()
-        torch.set_default_tensor_type(torch.HalfTensor)
 
     pad_w = math.ceil(clip.width / modulo) * modulo
     pad_h = math.ceil(clip.height / modulo) * modulo
@@ -127,7 +126,9 @@ def femasr(
         static_output: list[torch.Tensor] = []
 
         for i in range(num_streams):
-            static_input.append(torch.zeros((1, 3, pad_h, pad_w), device=device).to(memory_format=torch.channels_last))
+            static_input.append(
+                torch.zeros((1, 3, pad_h, pad_w), dtype=dtype, device=device).to(memory_format=torch.channels_last)
+            )
 
             torch.cuda.synchronize(device=device)
             stream[i].wait_stream(torch.cuda.current_stream(device=device))
@@ -169,7 +170,8 @@ def femasr(
             )
             lowerer = Lowerer.create(lower_setting=lower_setting)
             module = lowerer(
-                module, [torch.zeros((1, 3, pad_h, pad_w), device=device).to(memory_format=torch.channels_last)]
+                module,
+                [torch.zeros((1, 3, pad_h, pad_w), dtype=dtype, device=device).to(memory_format=torch.channels_last)],
             )
             torch.save(module, trt_engine_path)
 
