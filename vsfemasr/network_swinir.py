@@ -9,6 +9,12 @@ import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 
 
+@torch.fx.wrap
+def img_mask_assign(img_mask, h, w, cnt):
+    img_mask[:, h, w, :] = cnt
+    return img_mask
+
+
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -43,6 +49,7 @@ def window_partition(x, window_size):
     return windows
 
 
+@torch.fx.wrap
 def window_reverse(windows, window_size, H, W):
     """
     Args:
@@ -195,10 +202,10 @@ class SwinTransformerBlock(nn.Module):
 
         self.register_buffer("attn_mask", attn_mask)
 
-    def calculate_mask(self, x_size, dtype=None, device=None):
+    def calculate_mask(self, x_size, x=None):
         # calculate attention mask for SW-MSA
         H, W = x_size
-        img_mask = torch.zeros((1, H, W, 1), dtype=dtype, device=device)  # 1 H W 1
+        img_mask = torch.zeros((1, H, W, 1)) if x is None else x.new_zeros((1, H, W, 1))  # 1 H W 1
         h_slices = (slice(0, -self.window_size),
                     slice(-self.window_size, -self.shift_size),
                     slice(-self.shift_size, None))
@@ -208,7 +215,7 @@ class SwinTransformerBlock(nn.Module):
         cnt = 0
         for h in h_slices:
             for w in w_slices:
-                img_mask[:, h, w, :] = cnt
+                img_mask = img_mask_assign(img_mask, h, w, cnt)
                 cnt += 1
 
         mask_windows = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
@@ -238,10 +245,7 @@ class SwinTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA (to be compatible for testing on images whose shapes are the multiple of window size
-        if self.input_resolution == x_size:
-            attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
-        else:
-            attn_windows = self.attn(x_windows, mask=self.calculate_mask(x_size, dtype=x.dtype, device=x.device))
+        attn_windows = self.attn(x_windows, mask=self.calculate_mask(x_size, x))
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
