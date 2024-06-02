@@ -9,12 +9,6 @@ import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 
 
-@torch.fx.wrap
-def img_mask_assign(img_mask, h, w, cnt):
-    img_mask[:, h, w, :] = cnt
-    return img_mask
-
-
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -49,7 +43,6 @@ def window_partition(x, window_size):
     return windows
 
 
-@torch.fx.wrap
 def window_reverse(windows, window_size, H, W):
     """
     Args:
@@ -82,7 +75,6 @@ class WindowAttention(nn.Module):
     """
 
     def __init__(self, dim, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
-
         super().__init__()
         self.dim = dim
         self.window_size = window_size  # Wh, Ww
@@ -195,17 +187,13 @@ class SwinTransformerBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-        if self.shift_size > 0:
-            attn_mask = self.calculate_mask(self.input_resolution)
-        else:
-            attn_mask = None
+        attn_mask = self.calculate_mask(self.input_resolution)
+        self.register_buffer("attn_mask", attn_mask, persistent=False)
 
-        self.register_buffer("attn_mask", attn_mask)
-
-    def calculate_mask(self, x_size, x=None):
+    def calculate_mask(self, x_size):
         # calculate attention mask for SW-MSA
         H, W = x_size
-        img_mask = torch.zeros((1, H, W, 1)) if x is None else x.new_zeros((1, H, W, 1))  # 1 H W 1
+        img_mask = torch.zeros((1, H, W, 1))  # 1 H W 1
         h_slices = (slice(0, -self.window_size),
                     slice(-self.window_size, -self.shift_size),
                     slice(-self.shift_size, None))
@@ -215,7 +203,7 @@ class SwinTransformerBlock(nn.Module):
         cnt = 0
         for h in h_slices:
             for w in w_slices:
-                img_mask = img_mask_assign(img_mask, h, w, cnt)
+                img_mask[:, h, w, :] = cnt
                 cnt += 1
 
         mask_windows = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
@@ -245,7 +233,7 @@ class SwinTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA (to be compatible for testing on images whose shapes are the multiple of window size
-        attn_windows = self.attn(x_windows, mask=self.calculate_mask(x_size, x))
+        attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
@@ -288,7 +276,6 @@ class BasicLayer(nn.Module):
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False):
-
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution

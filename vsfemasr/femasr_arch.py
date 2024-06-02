@@ -4,8 +4,25 @@ import torch.nn.functional as F
 from torch import nn
 
 from .fema_utils import CombineQuantBlock, ResBlock
+from .interpolate import interpolate
 from .network_swinir import RSTB
 from .vgg_arch import VGGFeatureExtractor
+
+
+class Upsample(nn.Module):
+    def __init__(self, size=None, scale_factor=None, mode='nearest', align_corners=None, recompute_scale_factor=None):
+        super().__init__()
+        self.size = size
+        if isinstance(scale_factor, tuple):
+            self.scale_factor = tuple(float(factor) for factor in scale_factor)
+        else:
+            self.scale_factor = float(scale_factor) if scale_factor else None
+        self.mode = mode
+        self.align_corners = align_corners
+        self.recompute_scale_factor = recompute_scale_factor
+
+    def forward(self, input):
+        return interpolate(input, self.size, self.scale_factor, self.mode, self.align_corners, self.recompute_scale_factor)
 
 
 class VectorQuantizer(nn.Module):
@@ -78,23 +95,13 @@ class VectorQuantizer(nn.Module):
         z_q = torch.matmul(min_encodings, codebook)
         z_q = z_q.view(z.shape)
 
-        e_latent_loss = torch.mean((z_q.detach() - z)**2)
-        q_latent_loss = torch.mean((z_q - z.detach())**2)
-
-        if self.LQ_stage and gt_indices is not None:
-            codebook_loss = self.beta * ((z_q_gt.detach() - z) ** 2).mean()
-            texture_loss = self.gram_loss(z, z_q_gt.detach())
-            codebook_loss = codebook_loss + texture_loss
-        else:
-            codebook_loss = q_latent_loss + e_latent_loss * self.beta
-
         # preserve gradients
         z_q = z + (z_q - z).detach()
 
         # reshape back to match original input shape
         z_q = z_q.permute(0, 3, 1, 2).contiguous()
 
-        return z_q, codebook_loss, min_encoding_indices.reshape(z_q.shape[0], 1, z_q.shape[2], z_q.shape[3])
+        return z_q
 
 class SwinLayers(nn.Module):
     def __init__(self, input_resolution=(32, 32), embed_dim=256,
@@ -154,7 +161,7 @@ class MultiScaleEncoder(nn.Module):
             for i in range(2):
                 in_channel, out_channel = channel_query_dict[res], channel_query_dict[res * 2]
                 upsampler.append(nn.Sequential(
-                    nn.Upsample(scale_factor=2),
+                    Upsample(scale_factor=2),
                     nn.Conv2d(in_channel, out_channel, 3, stride=1, padding=1),
                     ResBlock(out_channel, out_channel, norm_type, act_type),
                     ResBlock(out_channel, out_channel, norm_type, act_type),
@@ -183,7 +190,7 @@ class DecoderBlock(nn.Module):
 
         self.block = []
         self.block += [
-            nn.Upsample(scale_factor=2),
+            Upsample(scale_factor=2),
             nn.Conv2d(in_channel, out_channel, 3, stride=1, padding=1),
             ResBlock(out_channel, out_channel, norm_type, act_type),
             ResBlock(out_channel, out_channel, norm_type, act_type),
@@ -198,6 +205,7 @@ class DecoderBlock(nn.Module):
 class FeMaSRNet(nn.Module):
     def __init__(self,
                  *,
+                 input_resolution,
                  in_channel=3,
                  codebook_params=None,
                  gt_resolution=256,
@@ -242,7 +250,8 @@ class FeMaSRNet(nn.Module):
                                 encode_depth,
                                 self.gt_res // self.scale_factor,
                                 channel_query_dict,
-                                norm_type, act_type, LQ_stage
+                                norm_type, act_type, LQ_stage,
+                                input_resolution=input_resolution,
                             )
 
 
@@ -291,6 +300,8 @@ class FeMaSRNet(nn.Module):
             self.vgg_feat_layer = 'relu4_4'
             self.vgg_feat_extractor = VGGFeatureExtractor([self.vgg_feat_layer])
 
+        self.cur_res_in_codebook_scale = (True, False, False)
+
     def encode_and_decode(self, input, gt_indices=None, current_iter=None):
         enc_feats = self.multiscale_encoder(input.detach())
         if self.LQ_stage:
@@ -302,8 +313,6 @@ class FeMaSRNet(nn.Module):
             with torch.no_grad():
                 vgg_feat = self.vgg_feat_extractor(input)[self.vgg_feat_layer]
 
-        codebook_loss_list = []
-        indices_list = []
         semantic_loss_list = []
 
         quant_idx = 0
@@ -311,8 +320,7 @@ class FeMaSRNet(nn.Module):
         prev_quant_feat = None
         x = enc_feats[0]
         for i in range(self.max_depth):
-            cur_res = self.gt_res // 2**self.max_depth * 2**i
-            if cur_res in self.codebook_scale:  # needs to perform quantize
+            if self.cur_res_in_codebook_scale[i]:  # needs to perform quantize
                 if prev_dec_feat is not None:
                     before_quant_feat = torch.cat((enc_feats[i], prev_dec_feat), dim=1)
                 else:
@@ -320,9 +328,9 @@ class FeMaSRNet(nn.Module):
                 feat_to_quant = self.before_quant_group[quant_idx](before_quant_feat)
 
                 if gt_indices is not None:
-                    z_quant, codebook_loss, indices = self.quantize_group[quant_idx](feat_to_quant, gt_indices[quant_idx])
+                    z_quant = self.quantize_group[quant_idx](feat_to_quant, gt_indices[quant_idx])
                 else:
-                    z_quant, codebook_loss, indices = self.quantize_group[quant_idx](feat_to_quant)
+                    z_quant = self.quantize_group[quant_idx](feat_to_quant)
 
                 if self.use_semantic_loss:
                     semantic_z_quant = self.conv_semantic(z_quant)
@@ -333,9 +341,6 @@ class FeMaSRNet(nn.Module):
                     z_quant = feat_to_quant
 
                 after_quant_feat = self.after_quant_group[quant_idx](z_quant, prev_quant_feat)
-
-                codebook_loss_list.append(codebook_loss)
-                indices_list.append(indices)
 
                 quant_idx += 1
                 prev_quant_feat = z_quant
@@ -349,12 +354,7 @@ class FeMaSRNet(nn.Module):
             x = self.decoder_group[i](x)
             prev_dec_feat = x
 
-        out_img = self.out_conv(x)
-
-        codebook_loss = sum(codebook_loss_list)
-        semantic_loss = sum(semantic_loss_list) if len(semantic_loss_list) else codebook_loss * 0
-
-        return out_img
+        return self.out_conv(x)
 
     def forward(self, input):
         return self.encode_and_decode(input)

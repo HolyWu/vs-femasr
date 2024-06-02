@@ -1,6 +1,7 @@
 import torch
 from torch import nn
-from torch.nn import functional as F
+
+from .interpolate import interpolate
 
 
 class NormLayer(nn.Module):
@@ -92,7 +93,7 @@ class CombineQuantBlock(nn.Module):
 
     def forward(self, input1, input2=None):
         if input2 is not None:
-            input2 = F.interpolate(input2, input1.shape[2:])
+            input2 = interpolate(input2, input1.shape[2:])
             input = torch.cat((input1, input2), dim=1)
         else:
             input = input1
