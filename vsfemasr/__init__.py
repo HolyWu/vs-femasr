@@ -13,7 +13,7 @@ import vapoursynth as vs
 
 from .femasr_arch import FeMaSRNet
 
-__version__ = "1.2.0"
+__version__ = "2.0.0"
 
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 
